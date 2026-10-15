@@ -6,7 +6,7 @@
   <title>Codex WebUI</title>
   <meta name="description" content="Free self-hosted browser UI for Codex on your machine.">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=18">
+  <link rel="stylesheet" href="/app.css?v=19">
   <script src="/viewport.js?v=3"></script>
 </head>
 <body data-theme="dark" data-accent="green">
@@ -265,6 +265,24 @@
       </section>
 
       <section class="prefs-section">
+        <div class="archived-heading">
+          <h3>Archived sessions</h3>
+          <div class="archived-heading-actions">
+            <button type="button" class="text-button hidden" id="archived-select-all">Select all</button>
+            <button type="button" class="text-button" id="archived-select-toggle">Select</button>
+            <button type="button" class="icon-button" id="refresh-archived" aria-label="Refresh archived sessions">↻</button>
+          </div>
+        </div>
+        <p class="prefs-hint">Swipe left to restore a session, or hold to select several.</p>
+        <div class="archived-list" id="archived-list" aria-label="Archived sessions"></div>
+        <button type="button" class="secondary archived-load-more hidden" id="archived-load-more">Load more</button>
+        <div class="thread-selection-bar hidden" id="archived-selection-bar">
+          <span id="archived-selection-count">0 selected</span>
+          <button type="button" id="restore-selected">Restore</button>
+        </div>
+      </section>
+
+      <section class="prefs-section">
         <h3>Agent Media Tools <small>(optional)</small></h3>
         <p class="prefs-hint">Connect a Bearer agent key to see AMT daily usage, credits, and tools. Separate from Codex model usage.</p>
         <label class="prefs-field">
@@ -307,6 +325,6 @@
   </div>
 
   <script src="/dictation.js?v=2"></script>
-  <script src="/app.js?v=19"></script>
+  <script src="/app.js?v=20"></script>
 </body>
 </html>

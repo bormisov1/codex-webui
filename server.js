@@ -470,7 +470,7 @@ function serveStatic(req, res, pathname) {
   return true;
 }
 
-async function api(req, res, pathname) {
+async function api(req, res, pathname, searchParams = new URLSearchParams()) {
   if (pathname === '/api/login' && req.method === 'POST') {
     const key = req.socket.remoteAddress || 'unknown';
     const attempts = loginAttempts.get(key) || { count: 0, reset: Date.now() + 60000 };
@@ -570,7 +570,11 @@ async function api(req, res, pathname) {
     return;
   }
   if (pathname === '/api/threads' && req.method === 'GET') {
-    const result = await bridge.request('thread/list', { limit: 100, sortKey: 'updated_at', sortDirection: 'desc' });
+    const result = await bridge.request('thread/list', {
+      limit: 100, sortKey: 'updated_at', sortDirection: 'desc',
+      archived: searchParams.get('archived') === 'true',
+      ...(searchParams.get('cursor') ? { cursor: searchParams.get('cursor') } : {}),
+    });
     return json(res, 200, result);
   }
   if (pathname === '/api/threads' && req.method === 'POST') {
@@ -702,6 +706,8 @@ async function api(req, res, pathname) {
       result = await bridge.request('thread/fork', { threadId });
     } else if (action === 'archive') {
       result = await bridge.request('thread/archive', { threadId });
+    } else if (action === 'unarchive') {
+      result = await bridge.request('thread/unarchive', { threadId });
     } else {
       return json(res, 404, { error: 'Unsupported thread command' });
     }
@@ -833,7 +839,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
     if (!sameOrigin(req)) return json(res, 403, { error: 'Origin rejected' });
-    if (url.pathname.startsWith('/api/')) return await api(req, res, url.pathname);
+    if (url.pathname.startsWith('/api/')) return await api(req, res, url.pathname, url.searchParams);
     const publicAssets = new Set(['/login.html', '/app.css', '/app.js', '/viewport.js']);
     if (!authenticated(req) && !publicAssets.has(url.pathname)) {
       res.writeHead(302, secureHeaders({ Location: '/login.html' }));

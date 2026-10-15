@@ -95,6 +95,7 @@ After upgrading the Codex CLI, regenerate the schema and test thread creation, h
 | --- | --- |
 | New thread | **＋ New thread**, pick a workspace, type a message |
 | Archive threads | Swipe left on a thread to reveal **Archive**, or keep swiping to archive immediately; hold a thread to select multiple, then tap **Select all** or individual threads and **Archive** |
+| Restore archived threads | Open **Prefs → Archived sessions**; swipe left to reveal **Restore**, keep swiping to restore immediately, or hold a session to select and restore several |
 | Dictation | Choose Auto (browser language), Russian, or English; click the microphone to speak, then click Send to finish recognition and send the complete text |
 | Stop a run | **Stop** in the top bar |
 | Activity | **Activity** rail for tools + plan |

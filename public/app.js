@@ -868,6 +868,27 @@ if ($('#composer-form')) {
   let renderedThreadIds = [];
   let revealedThreadId = null;
   let archivePending = false;
+  let archivedThreads = [];
+  let archivedCursor = null;
+  let archivedLoading = false;
+  let selectingArchived = false;
+  let revealedArchivedId = null;
+  let restorePending = false;
+  const selectedArchivedIds = new Set();
+
+  function setArchivedSelectionMode(enabled, firstId = null) {
+    selectingArchived = enabled;
+    revealedArchivedId = null;
+    if (!enabled) selectedArchivedIds.clear();
+    if (firstId) selectedArchivedIds.add(firstId);
+    renderArchivedThreads();
+  }
+
+  function toggleArchivedSelection(id) {
+    if (selectedArchivedIds.has(id)) selectedArchivedIds.delete(id);
+    else selectedArchivedIds.add(id);
+    renderArchivedThreads();
+  }
 
   function setThreadSelectionMode(enabled, firstId = null) {
     selectingThreads = enabled;
@@ -919,19 +940,81 @@ if ($('#composer-form')) {
     if (failed.length) toast(`${failed.length} thread${failed.length === 1 ? '' : 's'} could not be archived: ${failed[0].message}`, 'error');
   }
 
-  function bindThreadGesture(button, threadId) {
+  async function loadArchivedThreads({ more = false } = {}) {
+    if (archivedLoading) return;
+    archivedLoading = true;
+    renderArchivedThreads();
+    try {
+      const cursor = more && archivedCursor ? `&cursor=${encodeURIComponent(archivedCursor)}` : '';
+      const result = await request(`/api/threads?archived=true${cursor}`);
+      const listed = result.data || result.threads || result.items || [];
+      archivedThreads = more ? [...archivedThreads, ...listed.filter((thread) => !archivedThreads.some((old) => old.id === thread.id))] : listed;
+      archivedCursor = result.nextCursor || null;
+      const available = new Set(archivedThreads.map((thread) => thread.id));
+      for (const id of selectedArchivedIds) if (!available.has(id)) selectedArchivedIds.delete(id);
+    } catch (error) {
+      toast(`Could not load archived sessions: ${error.message}`, 'error');
+    } finally {
+      archivedLoading = false;
+      renderArchivedThreads();
+    }
+  }
+
+  async function restoreThreads(ids) {
+    if (restorePending) return;
+    const available = new Set(archivedThreads.map((thread) => thread.id));
+    const pending = [...new Set(ids)].filter((id) => available.has(id));
+    if (!pending.length) return;
+    restorePending = true;
+    revealedArchivedId = null;
+    renderArchivedThreads();
+    const restored = [];
+    const failed = [];
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+      while (next < pending.length) {
+        const id = pending[next++];
+        try {
+          await request(`/api/threads/${encodeURIComponent(id)}/commands/unarchive`, { method: 'POST', body: '{}' });
+          restored.push(id);
+        } catch (error) { failed.push(error); }
+      }
+    }));
+    const restoredIds = new Set(restored);
+    archivedThreads = archivedThreads.filter((thread) => !restoredIds.has(thread.id));
+    for (const id of restoredIds) selectedArchivedIds.delete(id);
+    restorePending = false;
+    if (!selectedArchivedIds.size) selectingArchived = false;
+    renderArchivedThreads();
+    if (restored.length) {
+      toast(`${restored.length} session${restored.length === 1 ? '' : 's'} restored`);
+      loadThreads();
+    }
+    if (failed.length) toast(`${failed.length} session${failed.length === 1 ? '' : 's'} could not be restored: ${failed[0].message}`, 'error');
+  }
+
+  function bindThreadGesture(button, threadId, archived = false) {
     let gesture = null;
     let suppressClick = false;
+    const pending = () => archived ? restorePending : archivePending;
+    const selecting = () => archived ? selectingArchived : selectingThreads;
+    const revealed = () => (archived ? revealedArchivedId : revealedThreadId) === threadId;
+    const setRevealed = (id) => {
+      if (archived) revealedArchivedId = id;
+      else revealedThreadId = id;
+    };
+    const render = () => archived ? renderArchivedThreads() : renderThreads();
     button.addEventListener('pointerdown', (event) => {
-      if (archivePending || (event.pointerType === 'mouse' && event.button !== 0) || event.target.closest('.pin-btn')) return;
+      if (pending() || (event.pointerType === 'mouse' && event.button !== 0) || event.target.closest('.pin-btn')) return;
       gesture = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, dragging: false, held: false };
       try { button.setPointerCapture(event.pointerId); } catch { /* Capture is optional. */ }
-      if (!selectingThreads) {
+      if (!selecting()) {
         gesture.timer = setTimeout(() => {
           if (!gesture || gesture.pointerId !== event.pointerId || gesture.dragging) return;
           gesture.held = true;
           suppressClick = true;
-          setThreadSelectionMode(true, threadId);
+          if (archived) setArchivedSelectionMode(true, threadId);
+          else setThreadSelectionMode(true, threadId);
         }, 500);
       }
     });
@@ -940,30 +1023,35 @@ if ($('#composer-form')) {
       const dx = event.clientX - gesture.x;
       const dy = event.clientY - gesture.y;
       if (Math.abs(dx) > 10 || Math.abs(dy) > 10) clearTimeout(gesture.timer);
-      const revealed = revealedThreadId === threadId;
-      if (selectingThreads || Math.abs(dy) > Math.abs(dx)
+      const alreadyRevealed = revealed();
+      if (selecting() || Math.abs(dy) > Math.abs(dx)
         || (Math.abs(dx) <= 10 && !gesture.dragging)
-        || (dx > 0 && !revealed && !gesture.dragging)) return;
+        || (dx > 0 && !alreadyRevealed && !gesture.dragging)) return;
       gesture.dragging = true;
       suppressClick = true;
       if (event.cancelable) event.preventDefault();
       button.style.transition = 'none';
-      const offset = revealedThreadId === threadId ? -88 : 0;
-      button.style.transform = `translateX(${Math.max(-130, Math.min(0, offset + dx))}px)`;
+      const offset = alreadyRevealed ? -88 : 0;
+      const shift = Math.max(-130, Math.min(0, offset + dx));
+      button.style.transform = `translateX(${shift}px)`;
+      button.parentElement.style.setProperty('--reveal-width', `${Math.min(88, -shift)}px`);
     });
     button.addEventListener('pointerup', (event) => {
       if (!gesture || event.pointerId !== gesture.pointerId) return;
       clearTimeout(gesture.timer);
       const dx = event.clientX - gesture.x;
-      const offset = revealedThreadId === threadId ? -88 : 0;
+      const offset = revealed() ? -88 : 0;
       const dragged = gesture.dragging;
       gesture = null;
       if (!dragged) return;
       setTimeout(() => { suppressClick = false; }, 300);
-      if (offset + dx <= -120) archiveThreads([threadId]);
+      if (offset + dx <= -120) {
+        if (archived) restoreThreads([threadId]);
+        else archiveThreads([threadId]);
+      }
       else {
-        revealedThreadId = offset + dx <= -45 ? threadId : null;
-        renderThreads();
+        setRevealed(offset + dx <= -45 ? threadId : null);
+        render();
       }
     });
     button.addEventListener('pointercancel', () => {
@@ -971,14 +1059,18 @@ if ($('#composer-form')) {
       clearTimeout(gesture.timer);
       const dragged = gesture.dragging;
       gesture = null;
-      if (dragged) renderThreads();
+      if (dragged) render();
     });
     button.addEventListener('contextmenu', (event) => event.preventDefault());
     button.addEventListener('click', (event) => {
-      if (archivePending) return;
+      if (pending()) return;
       if (suppressClick) { event.preventDefault(); suppressClick = false; return; }
-      if (selectingThreads) toggleThreadSelection(threadId);
-      else if (revealedThreadId) { revealedThreadId = null; renderThreads(); }
+      if (selecting()) {
+        if (archived) toggleArchivedSelection(threadId);
+        else toggleThreadSelection(threadId);
+      }
+      else if (revealed()) { setRevealed(null); render(); }
+      else if (archived) { /* Restore is available through swipe or selection. */ }
       else openThread(threadId);
     });
   }
@@ -1087,6 +1179,67 @@ if ($('#composer-form')) {
       ].filter(Boolean).join(' · ');
       button.append(row, meta);
       bindThreadGesture(button, thread.id);
+      swipe.append(button);
+      list.append(swipe);
+    }
+  }
+
+  function renderArchivedThreads() {
+    const list = $('#archived-list');
+    if (!list) return;
+    list.replaceChildren();
+    $('#archived-select-toggle').textContent = selectingArchived ? 'Done' : 'Select';
+    $('#archived-select-toggle').disabled = restorePending || (!selectingArchived && !archivedThreads.length);
+    $('#archived-select-all').classList.toggle('hidden', !selectingArchived);
+    $('#archived-select-all').textContent = archivedThreads.length && archivedThreads.every((thread) => selectedArchivedIds.has(thread.id)) ? 'Deselect all' : 'Select all';
+    $('#archived-select-all').disabled = restorePending || !archivedThreads.length;
+    $('#refresh-archived').disabled = archivedLoading || restorePending;
+    $('#archived-selection-bar').classList.toggle('hidden', !selectingArchived);
+    $('#archived-selection-count').textContent = `${selectedArchivedIds.size} selected`;
+    $('#restore-selected').textContent = restorePending ? 'Restoring…' : 'Restore';
+    $('#restore-selected').disabled = restorePending || !selectedArchivedIds.size;
+    $('#archived-load-more').classList.toggle('hidden', !archivedCursor);
+    $('#archived-load-more').disabled = archivedLoading || restorePending;
+    if (!archivedThreads.length) {
+      const empty = document.createElement('p');
+      empty.className = 'prefs-hint';
+      empty.textContent = archivedLoading ? 'Loading archived sessions…' : 'No archived sessions';
+      list.append(empty);
+      return;
+    }
+    for (const thread of archivedThreads) {
+      const swipe = document.createElement('div');
+      swipe.className = `thread-swipe${revealedArchivedId === thread.id && !selectingArchived ? ' revealed' : ''}`;
+      if (!selectingArchived) {
+        const restore = document.createElement('button');
+        restore.type = 'button';
+        restore.className = 'thread-swipe-action restore';
+        restore.textContent = 'Restore';
+        restore.setAttribute('aria-label', `Restore ${threadTitle(thread)}`);
+        restore.tabIndex = revealedArchivedId === thread.id ? 0 : -1;
+        restore.addEventListener('click', () => restoreThreads([thread.id]));
+        swipe.append(restore);
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `thread-item${selectedArchivedIds.has(thread.id) ? ' selected' : ''}`;
+      if (selectingArchived) button.setAttribute('aria-pressed', String(selectedArchivedIds.has(thread.id)));
+      const row = document.createElement('div');
+      row.className = 'item-row';
+      if (selectingArchived) {
+        const mark = document.createElement('span');
+        mark.className = 'thread-selection-mark';
+        mark.textContent = selectedArchivedIds.has(thread.id) ? '✓' : '';
+        mark.setAttribute('aria-hidden', 'true');
+        row.append(mark);
+      }
+      const title = document.createElement('strong');
+      title.textContent = threadTitle(thread);
+      row.append(title);
+      const meta = document.createElement('span');
+      meta.textContent = [formatDate(thread.updatedAt || thread.updated_at || thread.createdAt || thread.created_at), thread.cwd ? String(thread.cwd).split('/').pop() : ''].filter(Boolean).join(' · ');
+      button.append(row, meta);
+      bindThreadGesture(button, thread.id, true);
       swipe.append(button);
       list.append(swipe);
     }
@@ -2351,6 +2504,18 @@ if ($('#composer-form')) {
     renderThreads();
   });
   $('#archive-selected').addEventListener('click', () => archiveThreads([...selectedThreadIds]));
+  $('#archived-select-toggle').addEventListener('click', () => setArchivedSelectionMode(!selectingArchived));
+  $('#archived-select-all').addEventListener('click', () => {
+    const allSelected = archivedThreads.length > 0 && archivedThreads.every((thread) => selectedArchivedIds.has(thread.id));
+    for (const thread of archivedThreads) {
+      if (allSelected) selectedArchivedIds.delete(thread.id);
+      else selectedArchivedIds.add(thread.id);
+    }
+    renderArchivedThreads();
+  });
+  $('#restore-selected').addEventListener('click', () => restoreThreads([...selectedArchivedIds]));
+  $('#refresh-archived').addEventListener('click', () => loadArchivedThreads());
+  $('#archived-load-more').addEventListener('click', () => loadArchivedThreads({ more: true }));
   $('#open-sidebar').addEventListener('click', () => $('#sidebar').classList.add('open'));
   $('#close-sidebar').addEventListener('click', () => $('#sidebar').classList.remove('open'));
   $('#session-search')?.addEventListener('input', () => renderThreads());
@@ -2423,6 +2588,7 @@ if ($('#composer-form')) {
     if (!prefsModal) return;
     applyPrefsToUi();
     refreshAmtStatus().catch(() => {});
+    loadArchivedThreads();
     prefsModal.classList.remove('hidden');
     $('#close-prefs')?.focus();
   }

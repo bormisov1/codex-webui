@@ -160,9 +160,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thread-swipe-action {
   position: absolute; inset: 0 0 0 auto; width: 88px; padding: 0;
   border: 0; background: #aa3434; color: #fff; font: inherit; font-size: 12px; font-weight: 700;
+  clip-path: inset(0 0 0 calc(88px - var(--reveal-width, 0px)));
 }
 .thread-swipe-action:focus-visible { outline: 2px solid var(--text); outline-offset: -3px; }
+.thread-swipe.revealed { --reveal-width: 88px; }
 .thread-swipe.revealed .thread-item { transform: translateX(-88px); }
+.thread-swipe-action.restore { background: #276b4d; }
 .thread-item {
   display: block; width: 100%; margin: 0; padding: 10px 10px;
   color: #c5c9d0; background: #0e1013; border: 0; border-radius: 9px; text-align: left;
@@ -683,6 +686,14 @@ select {
 .prefs-amt-status.ok { color: var(--green); border-color: rgba(121, 232, 181, .28); }
 .prefs-amt-status.err { color: var(--red); }
 .prefs-tools-list { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
+.archived-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.archived-heading h3 { margin: 0; }
+.archived-heading-actions { display: flex; gap: 4px; }
+.archived-list { max-height: 300px; overflow-y: auto; margin-top: 10px; }
+.archived-list .thread-item { background: var(--bg); }
+.archived-list .thread-item:hover, .archived-list .thread-item.selected { background: var(--panel); }
+.archived-list .thread-swipe-action { background: #276b4d; }
+.archived-load-more { width: 100%; min-height: 36px; margin-top: 8px; }
 .prefs-tool {
   display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px;
   border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
