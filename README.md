@@ -20,6 +20,7 @@ endorsed by OpenAI.
 - Browse recent uploads and generated workspace files in an authenticated file/image gallery
 - Choose Restrictive, Moderate, or YOLO permissions backed by Codex approval and sandbox policies
 - Queue follow-up messages while Codex works, or interrupt and send one immediately
+- Check **Resume after limit reset** in a chat to retry a limit-blocked message or continue a failed turn when Codex reports its reset time. The chip counts down while the WebUI tab stays open; the choice and pending retry survive a page refresh.
 - Browse the complete current Codex CLI slash-command catalog with real WebUI/app-server actions where supported and clear labels for terminal-only flows
 - Keep the active execution plan and live chat updates across page refreshes
 - Reasoning effort picker

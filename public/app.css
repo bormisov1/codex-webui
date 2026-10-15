@@ -262,6 +262,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .usage-chip.ok { color: var(--green); border-color: rgba(121, 232, 181, .25); }
 .usage-chip.warn { color: var(--amber); }
 .usage-chip.hidden { display: none !important; }
+.auto-resume {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 22px;
+  color: var(--muted); font-size: 10px; cursor: pointer; white-space: nowrap;
+}
+.auto-resume input { accent-color: var(--green); margin: 0; }
 .top-actions { display: flex; align-items: center; gap: 10px; }
 .activity-toggle {
   display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px;
