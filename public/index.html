@@ -6,7 +6,7 @@
   <title>Codex WebUI</title>
   <meta name="description" content="Free self-hosted browser UI for Codex on your machine.">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=17">
+  <link rel="stylesheet" href="/app.css?v=18">
   <script src="/viewport.js?v=3"></script>
 </head>
 <body data-theme="dark" data-accent="green">
@@ -27,8 +27,19 @@
         <span class="sr-only">Search threads</span>
         <input type="search" id="session-search" placeholder="Search threads…" autocomplete="off">
       </label>
-      <div class="thread-heading"><span>THREADS</span><button class="icon-button" id="refresh-threads" title="Refresh">↻</button></div>
+      <div class="thread-heading">
+        <span id="thread-heading-label">THREADS</span>
+        <div class="thread-heading-actions">
+          <button class="text-button hidden" id="thread-select-all" type="button">Select all</button>
+          <button class="text-button" id="thread-select-toggle" type="button">Select</button>
+          <button class="icon-button" id="refresh-threads" type="button" title="Refresh" aria-label="Refresh threads">↻</button>
+        </div>
+      </div>
       <nav class="thread-list" id="thread-list" aria-label="Conversations"></nav>
+      <div class="thread-selection-bar hidden" id="thread-selection-bar">
+        <span id="thread-selection-count">0 selected</span>
+        <button id="archive-selected" type="button" disabled>Archive</button>
+      </div>
       <footer class="sidebar-footer">
         <div class="connection"><i id="connection-dot"></i><span id="connection-label">Connecting</span></div>
         <div class="sidebar-footer-actions">
@@ -296,6 +307,6 @@
   </div>
 
   <script src="/dictation.js?v=2"></script>
-  <script src="/app.js?v=18"></script>
+  <script src="/app.js?v=19"></script>
 </body>
 </html>
