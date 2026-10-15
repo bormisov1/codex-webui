@@ -6,7 +6,7 @@
   <title>Codex WebUI</title>
   <meta name="description" content="Free self-hosted browser UI for Codex on your machine.">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=15">
+  <link rel="stylesheet" href="/app.css?v=17">
   <script src="/viewport.js?v=3"></script>
 </head>
 <body data-theme="dark" data-accent="green">
@@ -136,7 +136,9 @@
             <button type="button" class="attach-button" id="attach-button" title="Attach files or images" aria-label="Attach files">📎</button>
             <input type="file" id="file-input" class="hidden" multiple>
             <textarea id="message" rows="1" maxlength="50000" placeholder="Message Codex…  (/ for commands)"></textarea>
+            <button type="button" class="dictation-button" id="dictation-button" title="Start dictation" aria-label="Start dictation" aria-pressed="false"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg></button>
           </div>
+          <p class="dictation-status hidden" id="dictation-status" role="status" aria-live="polite"></p>
           <div class="composer-footer">
             <div class="composer-settings">
               <select id="effort" aria-label="Reasoning effort">
@@ -145,6 +147,11 @@
                 <option value="medium">Medium reasoning</option>
                 <option value="high">High reasoning</option>
                 <option value="xhigh">Extra high reasoning</option>
+              </select>
+              <select id="dictation-language" aria-label="Dictation language" title="Dictation language">
+                <option value="">Speech: Auto</option>
+                <option value="ru-RU">Speech: Русский</option>
+                <option value="en-US">Speech: English</option>
               </select>
               <span id="active-workspace"></span>
             </div>
@@ -288,6 +295,7 @@
     </div>
   </div>
 
-  <script src="/app.js?v=16"></script>
+  <script src="/dictation.js?v=2"></script>
+  <script src="/app.js?v=18"></script>
 </body>
 </html>

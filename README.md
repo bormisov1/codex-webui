@@ -15,6 +15,7 @@ endorsed by OpenAI.
 - Create a thread for any folder under `WORKSPACE_ROOT`
 - Stream agent messages and tool activity
 - Attach files and images with the picker, drag-and-drop, or clipboard paste (up to 10 files, 25 MB each)
+- Dictate a message with the browser's speech recognition when available
 - Browse recent uploads and generated workspace files in an authenticated file/image gallery
 - Choose Restrictive, Moderate, or YOLO permissions backed by Codex approval and sandbox policies
 - Queue follow-up messages while Codex works, or interrupt and send one immediately
@@ -92,6 +93,7 @@ After upgrading the Codex CLI, regenerate the schema and test thread creation, h
 | Action | How |
 | --- | --- |
 | New thread | **＋ New thread**, pick a workspace, type a message |
+| Dictation | Choose Auto (browser language), Russian, or English; click the microphone to speak, then click Send to finish recognition and send the complete text |
 | Stop a run | **Stop** in the top bar |
 | Activity | **Activity** rail for tools + plan |
 | Approvals | Drawer when Codex requests permission |
@@ -100,6 +102,8 @@ After upgrading the Codex CLI, regenerate the schema and test thread creation, h
 | Follow-up | Send while working, then choose **Queue** or **Interrupt & send** |
 | WebUI commands | Type `/` |
 | Tip | Sidebar **♡ Tip** (optional) |
+
+Dictation uses the browser's Web Speech API and adds recognized text to the local draft. Browser support and microphone permissions vary; some browsers use their own online recognition service. The WebUI does not upload audio to its server.
 
 ## Optional tip
 
