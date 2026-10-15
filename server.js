@@ -27,6 +27,10 @@ loadEnv(path.join(PROJECT_ROOT, '.env'));
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 4545);
+const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || '';
+if (PUBLIC_ORIGIN && (!PUBLIC_ORIGIN.startsWith('https://') || new URL(PUBLIC_ORIGIN).origin !== PUBLIC_ORIGIN)) {
+  throw new Error('PUBLIC_ORIGIN must be an HTTPS origin without a path or trailing slash');
+}
 const WORKSPACE_ROOT = fs.realpathSync(process.env.WORKSPACE_ROOT || os.homedir());
 const PASSWORD_SALT = process.env.PASSWORD_SALT || '';
 const PASSWORD_HASH = process.env.PASSWORD_HASH || '';
@@ -145,7 +149,9 @@ async function readJson(req, limit = 1024 * 1024) {
 function sameOrigin(req) {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return true;
   const origin = req.headers.origin;
-  return origin === `http://${HOST}:${PORT}` || origin === `https://${HOST}:${PORT}`;
+  return origin === `http://${HOST}:${PORT}`
+    || origin === `https://${HOST}:${PORT}`
+    || (PUBLIC_ORIGIN !== '' && origin === PUBLIC_ORIGIN);
 }
 
 function allowedWorkspace(input) {
