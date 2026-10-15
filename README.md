@@ -95,6 +95,7 @@ After upgrading the Codex CLI, regenerate the schema and test thread creation, h
 | --- | --- |
 | New thread | **＋ New thread**, pick a workspace, type a message |
 | Archive threads | Swipe left on a thread to reveal **Archive**, or keep swiping to archive immediately; hold a thread to select multiple, then tap **Select all** or individual threads and **Archive** |
+| Many sessions | Tap **Load more sessions** to fetch the next page, then select and archive the loaded sessions in one batch |
 | Restore archived threads | Open **Prefs → Archived sessions**; swipe left to reveal **Restore**, keep swiping to restore immediately, or hold a session to select and restore several |
 | Dictation | Choose Auto (browser language), Russian, or English; click the microphone to speak, then click Send to finish recognition and send the complete text |
 | Stop a run | **Stop** in the top bar |
@@ -108,6 +109,8 @@ After upgrading the Codex CLI, regenerate the schema and test thread creation, h
 
 Dictation uses the browser's Web Speech API and adds recognized text to the local draft. Browser support and microphone permissions vary; some browsers use their own online recognition service. The WebUI does not upload audio to its server.
 On iPhone, open the HTTPS page directly in Safari and enable Dictation in iPhone Settings. WebKit does not provide this API to home-screen apps or some in-app browsers even when the microphone button appears. The iPhone keyboard microphone remains an alternative.
+
+Archived sessions are stored by the local Codex installation, not by browser storage. Every browser using this WebUI sees the same archive state on this host; another Codex installation on a different computer has its own archive.
 
 ## Optional tip
 
