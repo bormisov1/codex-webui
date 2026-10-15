@@ -93,6 +93,8 @@ if ($('#composer-form')) {
     amtStatus: null,
     reconnectEvents: [],
     messageQueue: [],
+    queueSending: false,
+    queueFailedId: null,
     stagedMessage: null,
     commandIndex: 0,
   };
@@ -315,7 +317,13 @@ if ($('#composer-form')) {
       const label = document.createElement('span'); label.textContent = item.text || item.attachments?.map((file) => file.name).join(', ') || 'Attachment';
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.title = 'Remove queued message';
       remove.addEventListener('click', () => { state.messageQueue = state.messageQueue.filter((queued) => queued.id !== item.id); saveMessageQueue(); });
-      row.append(label, remove); wrap.append(row);
+      row.append(label);
+      if (state.queueFailedId === item.id) {
+        const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry';
+        retry.addEventListener('click', () => { state.queueFailedId = null; flushMessageQueue(); });
+        row.append(retry);
+      }
+      row.append(remove); wrap.append(row);
     }
   }
   function enqueueStaged({ interrupt = false } = {}) {
@@ -324,18 +332,35 @@ if ($('#composer-form')) {
     state.stagedMessage = null;
     clearAttachments();
     $('#queue-choice').classList.add('hidden');
+    saveDraft();
     saveMessageQueue();
     if (interrupt) $('#interrupt').click();
   }
-  function flushMessageQueue() {
-    if (state.running) return;
+  async function flushMessageQueue() {
+    if (state.running || state.queueSending) return;
     const index = state.messageQueue.findIndex((item) => !item.threadId || item.threadId === state.threadId);
     if (index < 0) return;
-    const [next] = state.messageQueue.splice(index, 1);
-    saveMessageQueue();
+    const next = state.messageQueue[index];
+    if (state.queueFailedId === next.id) return;
+    state.queueSending = true;
     state.attachments = next.attachments || [];
     renderAttachments();
-    setTimeout(() => sendMessage(next.text || ''), 250);
+    let sent = false;
+    try {
+      sent = await sendMessage(next.text || '');
+      if (sent) {
+        state.messageQueue = state.messageQueue.filter((item) => item.id !== next.id);
+        saveMessageQueue();
+      } else {
+        state.queueFailedId = next.id;
+        renderMessageQueue();
+      }
+    } finally {
+      state.queueSending = false;
+      if (sent && !state.running && state.messageQueue.some((item) => !item.threadId || item.threadId === state.threadId)) {
+        flushMessageQueue();
+      }
+    }
   }
 
   function workspaceSystemPrompt() {
@@ -730,6 +755,8 @@ if ($('#composer-form')) {
   let dictationInterim = '';
   let dictationFailed = false;
   let composerSubmitPending = false;
+  const iphoneBrowser = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const standaloneBrowser = navigator.standalone === true || window.matchMedia?.('(display-mode: standalone)').matches;
   function renderDictation(stateName) {
     if (stateName === 'starting') dictationFailed = false;
     dictationState = stateName;
@@ -767,7 +794,9 @@ if ($('#composer-form')) {
       dictationFailed = true;
       const messages = {
         'not-allowed': 'Microphone access was denied.',
-        'service-not-allowed': 'Browser speech recognition is blocked.',
+        'service-not-allowed': iphoneBrowser
+          ? 'iPhone blocked browser speech recognition. Open this page in Safari, enable Dictation in iPhone Settings, or use the keyboard microphone.'
+          : 'Browser speech recognition is blocked. Check browser speech and microphone permissions.',
         'audio-capture': 'No microphone was found.',
         'no-speech': 'No speech was detected.',
         network: 'Browser speech recognition is unavailable right now.',
@@ -784,6 +813,14 @@ if ($('#composer-form')) {
   dictationButton.addEventListener('click', () => {
     if (dictation.isActive()) dictation.stop();
     else {
+      if (iphoneBrowser && standaloneBrowser) {
+        toast('iPhone home-screen apps cannot use browser speech recognition. Open this page in Safari or use the keyboard microphone.', 'error');
+        return;
+      }
+      if (!window.isSecureContext) {
+        toast('Speech recognition needs a secure HTTPS page. Open the HTTPS WebUI address.', 'error');
+        return;
+      }
       try { dictation.start({ language: dictationLanguage.value || navigator.language }); }
       catch (error) { toast(error.message, 'error'); }
     }
@@ -1258,6 +1295,10 @@ if ($('#composer-form')) {
   function restoreDraft() {
     try {
       const text = localStorage.getItem(draftKey()) || '';
+      if (text && state.messageQueue.some((item) => item.threadId === state.threadId && item.text === text)) {
+        clearDraft();
+        return;
+      }
       if ($('#message') && text) {
         $('#message').value = text;
         $('#message').dispatchEvent(new Event('input'));
@@ -1810,6 +1851,7 @@ if ($('#composer-form')) {
         }
         scheduleCatchupResync();
       }
+      if (!active) flushMessageQueue();
     } catch (error) {
       console.warn('resyncThread', error.message);
     } finally {
@@ -1900,6 +1942,7 @@ if ($('#composer-form')) {
       setRunning(thread.status?.type === 'active' || Boolean(activeTurn));
       renderThreads();
       restoreDraft();
+      if (!state.running) flushMessageQueue();
       $('#sidebar').classList.remove('open');
     } catch (error) {
       toast(error.message, 'error');
@@ -2045,7 +2088,7 @@ if ($('#composer-form')) {
 
   async function sendMessage(text) {
     const cleaned = text.trim();
-    if ((!cleaned && !state.attachments.length) || state.running) return;
+    if ((!cleaned && !state.attachments.length) || state.running) return false;
     const attachments = state.attachments.map((file) => ({
       name: file.name,
       path: file.path,
@@ -2098,8 +2141,8 @@ if ($('#composer-form')) {
       });
       state.turnId = result.turn?.id || result.id || state.turnId;
       clearAttachments();
-      clearDraft();
       setTimeout(loadThreads, 1200);
+      return true;
     } catch (error) {
       state.optimisticUsers = (state.optimisticUsers || []).filter((item) => item.id !== optimistic.id);
       setRunning(false);
@@ -2108,6 +2151,7 @@ if ($('#composer-form')) {
       clearCatchupTimers();
       toast(error.message, 'error');
       if (state.threadId) resyncThread({ force: true });
+      return false;
     }
   }
 
@@ -2392,12 +2436,17 @@ if ($('#composer-form')) {
         state.stagedMessage = { text, attachments: state.attachments.map((file) => ({ ...file })) };
         input.value = '';
         input.style.height = '';
+        clearDraft();
         $('#queue-choice').classList.remove('hidden');
         return;
       }
       input.value = '';
       input.style.height = '';
-      sendMessage(text);
+      clearDraft();
+      if (!await sendMessage(text) && !input.value) {
+        input.value = text;
+        saveDraft();
+      }
     } catch (error) {
       toast(`Dictation could not finish: ${error.message}`, 'error');
     } finally {
@@ -2416,6 +2465,7 @@ if ($('#composer-form')) {
     if (state.stagedMessage) $('#message').value = state.stagedMessage.text || '';
     state.stagedMessage = null;
     $('#queue-choice').classList.add('hidden');
+    saveDraft();
   });
   $('#message').addEventListener('keydown', (event) => {
     const menu = $('#command-menu');
