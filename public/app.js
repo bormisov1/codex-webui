@@ -1791,7 +1791,8 @@ if ($('#composer-form')) {
       renderThreads();
       updateRunStatus();
     }
-    if (eventThreadId && state.threadId && eventThreadId !== state.threadId) return;
+    // A new thread has no ID yet, so events from existing threads stay in the background.
+    if (eventThreadId && eventThreadId !== state.threadId) return;
     if (method === 'turn/started') {
       state.turnId = params.turn?.id || params.turnId;
       setRunning(true);
