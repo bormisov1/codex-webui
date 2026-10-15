@@ -89,6 +89,9 @@ if ($('#composer-form')) {
     lastTurnTokens: 0,
     providerUsageLabel: '',
     accountRateLimits: null,
+    autoResume: {},
+    limitFailure: false,
+    autoResumeSending: false,
     prefs: null,
     amtStatus: null,
     reconnectEvents: [],
@@ -101,6 +104,7 @@ if ($('#composer-form')) {
 
   const PREFS_KEY = 'codex-webui-prefs-v1';
   const QUEUE_KEY = 'codex-webui-message-queue-v1';
+  const AUTO_RESUME_KEY = 'codex-webui-auto-resume-v1';
   const DEFAULT_PREFS = {
     defaultEffort: '',
     systemPrompt: '',
@@ -437,6 +441,107 @@ if ($('#composer-form')) {
       hour: 'numeric',
       minute: '2-digit',
     });
+  }
+
+  function resetTime(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? (n < 1e12 ? n * 1000 : n) : null;
+  }
+
+  function rateLimitError(message) {
+    return /rate.?limit|usage.?limit|quota|too many requests|limit exceeded|try again after|resets? (?:at|in)/i.test(String(message || ''));
+  }
+
+  function loadAutoResume() {
+    try { state.autoResume = JSON.parse(localStorage.getItem(AUTO_RESUME_KEY) || '{}') || {}; }
+    catch { state.autoResume = {}; }
+  }
+
+  function saveAutoResume() {
+    localStorage.setItem(AUTO_RESUME_KEY, JSON.stringify(state.autoResume));
+    renderAutoResume();
+  }
+
+  function autoResumeEntry() {
+    return state.autoResume[state.threadId || 'new'] || null;
+  }
+
+  function renderAutoResume() {
+    const entry = autoResumeEntry();
+    $('#auto-resume-limit').checked = Boolean(entry?.enabled);
+    const chip = $('#auto-resume-status');
+    const pending = entry?.pending;
+    chip.classList.toggle('hidden', !pending);
+    if (!pending) return;
+    const seconds = Math.max(0, Math.ceil((pending.resetAt - Date.now()) / 1000));
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    chip.textContent = seconds
+      ? `Resume in ${days ? `${days}d ` : ''}${hours ? `${hours}h ` : ''}${minutes}m ${String(secs).padStart(2, '0')}s`
+      : 'Checking limit…';
+    chip.title = `Codex limit resets ${new Date(pending.resetAt).toLocaleString()}`;
+  }
+
+  function exhaustedResetTime() {
+    const windows = [state.accountRateLimits?.primary, state.accountRateLimits?.secondary];
+    const exhausted = windows.filter((window) => Number(window?.usedPercent) >= 100);
+    const candidates = (exhausted.length ? exhausted : windows)
+      .map((window) => resetTime(window?.resetsAt)).filter((time) => time && time > Date.now());
+    return candidates.length ? (exhausted.length ? Math.max(...candidates) : Math.min(...candidates)) : null;
+  }
+
+  async function scheduleAutoResume(mode, text = '', attachments = []) {
+    const threadId = state.threadId;
+    if (!threadId || !state.autoResume[threadId]?.enabled) return false;
+    if (state.messageQueue.some((item) => !item.threadId || item.threadId === threadId)) return false;
+    if (state.autoResume[threadId].pending) return true;
+    await refreshAccountRateLimits();
+    const resetAt = exhaustedResetTime();
+    if (!resetAt) {
+      toast('Codex did not report a limit reset time; automatic resume is waiting for one.', 'error');
+      return false;
+    }
+    state.autoResume[threadId].pending = { resetAt, mode, text, attachments };
+    saveAutoResume();
+    return true;
+  }
+
+  async function checkAutoResume() {
+    const threadId = state.threadId;
+    const entry = autoResumeEntry();
+    renderAutoResume();
+    if (!threadId || !entry?.enabled || !entry.pending || state.running || state.autoResumeSending) return;
+    if (entry.pending.resetAt > Date.now()) return;
+    state.autoResumeSending = true;
+    try {
+      await refreshAccountRateLimits();
+      if (threadId !== state.threadId || !state.autoResume[threadId]?.enabled) return;
+      const pending = state.autoResume[threadId]?.pending;
+      if (!pending) return;
+      const stillExhausted = [state.accountRateLimits?.primary, state.accountRateLimits?.secondary]
+        .some((window) => Number(window?.usedPercent) >= 100 && resetTime(window.resetsAt) > Date.now());
+      if (stillExhausted) {
+        pending.resetAt = exhaustedResetTime() || Date.now() + 60_000;
+        saveAutoResume();
+        return;
+      }
+      delete state.autoResume[threadId].pending;
+      saveAutoResume();
+      if (pending.mode === 'retry') {
+        state.attachments = pending.attachments || [];
+        renderAttachments();
+      }
+      const sent = await sendMessage(pending.mode === 'retry' ? pending.text : 'Continue the task from where you stopped after the Codex usage limit reset.');
+      if (!sent && !state.autoResume[threadId]?.pending) {
+        pending.resetAt = Date.now() + 60_000;
+        state.autoResume[threadId].pending = pending;
+        saveAutoResume();
+      }
+    } finally {
+      state.autoResumeSending = false;
+    }
   }
 
   function formatRateWindow(window) {
@@ -1876,6 +1981,15 @@ if ($('#composer-form')) {
       // miss the SSE completion event and leave activeThreadIds stale.
       const active = thread.status?.type === 'active' || Boolean(activeTurn);
       setRunning(active);
+      if (!active && lastTurn && /fail|error/i.test(String(lastTurn.status || ''))
+          && (rateLimitError(lastTurn.error?.message)
+            || [state.accountRateLimits?.primary, state.accountRateLimits?.secondary].some((window) => Number(window?.usedPercent) >= 100))
+          && state.autoResume[state.threadId]?.enabled
+          && state.autoResume[state.threadId].lastHandledTurnId !== lastTurn.id) {
+        state.autoResume[state.threadId].lastHandledTurnId = lastTurn.id;
+        saveAutoResume();
+        scheduleAutoResume('continue').catch((error) => console.warn('auto resume', error.message));
+      }
       if (!active && state.awaitingTurn) {
         state.awaitingTurn = false;
         stopResyncLoop();
@@ -1936,6 +2050,18 @@ if ($('#composer-form')) {
   }
 
   function markTurnComplete(params = {}) {
+    const failed = /fail|error/i.test(String(params.turn?.status || params.status || ''));
+    const errorMessage = params.turn?.error?.message || params.error?.message || '';
+    if (state.limitFailure || (failed && (rateLimitError(errorMessage)
+        || [state.accountRateLimits?.primary, state.accountRateLimits?.secondary].some((window) => Number(window?.usedPercent) >= 100)))) {
+      const turnId = params.turn?.id || params.turnId || state.turnId;
+      if (turnId && state.autoResume[state.threadId]) {
+        state.autoResume[state.threadId].lastHandledTurnId = turnId;
+        saveAutoResume();
+      }
+      scheduleAutoResume('continue').catch((error) => console.warn('auto resume', error.message));
+    }
+    state.limitFailure = false;
     updateActivity(`turn-${state.turnId || params.turn?.id || params.turnId}`, {
       title: 'Turn completed',
       detail: '',
@@ -1960,6 +2086,7 @@ if ($('#composer-form')) {
       const result = await request(`/api/threads/${encodeURIComponent(id)}`);
       const thread = result.thread || result;
       state.threadId = thread.id || id;
+      renderAutoResume();
       renderMessageQueue();
       localStorage.setItem('codex-webui-active-thread', state.threadId);
       state.optimisticUsers = [];
@@ -1991,6 +2118,8 @@ if ($('#composer-form')) {
     selectedThreadIds.clear();
     revealedThreadId = null;
     state.threadId = null;
+    state.limitFailure = false;
+    renderAutoResume();
     localStorage.removeItem('codex-webui-active-thread');
     state.turnId = null;
     state.streamingNode = null;
@@ -2031,6 +2160,11 @@ if ($('#composer-form')) {
     const thread = result.thread || result;
     state.threadId = thread.id;
     if (!state.threadId) throw new Error('Codex did not return a thread ID');
+    if (state.autoResume.new) {
+      state.autoResume[state.threadId] = state.autoResume.new;
+      delete state.autoResume.new;
+      saveAutoResume();
+    }
     localStorage.setItem('codex-webui-active-thread', state.threadId);
     $('#thread-path').textContent = state.cwd;
     return state.threadId;
@@ -2125,6 +2259,10 @@ if ($('#composer-form')) {
   async function sendMessage(text) {
     const cleaned = text.trim();
     if ((!cleaned && !state.attachments.length) || state.running) return false;
+    if (!state.autoResumeSending && autoResumeEntry()?.pending) {
+      delete autoResumeEntry().pending;
+      saveAutoResume();
+    }
     const attachments = state.attachments.map((file) => ({
       name: file.name,
       path: file.path,
@@ -2180,6 +2318,9 @@ if ($('#composer-form')) {
       setTimeout(loadThreads, 1200);
       return true;
     } catch (error) {
+      if (rateLimitError(error.message)) {
+        await scheduleAutoResume('retry', cleaned, attachments.map(({ name, path, mimeType }) => ({ name, path, mimeType })));
+      }
       state.optimisticUsers = (state.optimisticUsers || []).filter((item) => item.id !== optimistic.id);
       setRunning(false);
       state.awaitingTurn = false;
@@ -2329,7 +2470,9 @@ if ($('#composer-form')) {
     } else if (method === 'turn/completed') {
       markTurnComplete(params);
     } else if (method === 'error') {
-      toast(params.error?.message || params.message || 'Codex reported an error', 'error');
+      const errorMessage = params.error?.message || params.message || 'Codex reported an error';
+      if (rateLimitError(errorMessage)) state.limitFailure = true;
+      toast(errorMessage, 'error');
       scheduleCatchupResync();
     } else if (method === 'item/reasoning/summaryTextDelta') {
       updateActivity(params.itemId, { title: 'Reasoning summary', append: params.delta || '', kind: 'reasoning', status: 'running' });
@@ -2395,6 +2538,9 @@ if ($('#composer-form')) {
 
   async function initialize() {
     try {
+      loadAutoResume();
+      renderAutoResume();
+      setInterval(() => checkAutoResume().catch((error) => console.warn('auto resume', error.message)), 1000);
       loadPrefs();
       applyPrefsToUi();
       updateUsageStrip();
@@ -2426,6 +2572,7 @@ if ($('#composer-form')) {
         state.reconnectEvents = [];
         for (const entry of replay) handleCodexEvent(entry.event);
       }
+      checkAutoResume().catch(() => {});
       refreshAmtStatus().catch(() => {});
       refreshAccountRateLimits().catch(() => {});
 
@@ -2433,12 +2580,14 @@ if ($('#composer-form')) {
         if (document.visibilityState === 'visible' && state.threadId) {
           resyncThread({ force: true });
           refreshAccountRateLimits().catch(() => {});
+          checkAutoResume().catch(() => {});
           if (state.eventSource?.readyState === EventSource.CLOSED) connectEvents();
         }
       });
       window.addEventListener('focus', () => {
         if (state.threadId) resyncThread();
         refreshAccountRateLimits().catch(() => {});
+        checkAutoResume().catch(() => {});
       });
       window.addEventListener('pageshow', () => {
         if (state.threadId) resyncThread({ force: true });
@@ -2494,6 +2643,25 @@ if ($('#composer-form')) {
     event.preventDefault();
     hideCommands();
     submitComposer();
+  });
+  $('#auto-resume-limit').addEventListener('change', async (event) => {
+    const key = state.threadId || 'new';
+    state.autoResume[key] = { ...(state.autoResume[key] || {}), enabled: event.target.checked };
+    if (!event.target.checked) delete state.autoResume[key].pending;
+    saveAutoResume();
+    if (event.target.checked && state.threadId && !state.running) {
+      try {
+        const result = await request(`/api/threads/${encodeURIComponent(state.threadId)}`);
+        const turns = (result.thread || result).turns || [];
+        const last = turns[turns.length - 1];
+        const message = last?.error?.message || '';
+        if (last && /fail|error/i.test(String(last.status || ''))
+            && (rateLimitError(message)
+              || [state.accountRateLimits?.primary, state.accountRateLimits?.secondary].some((window) => Number(window?.usedPercent) >= 100))) {
+          await scheduleAutoResume('continue');
+        }
+      } catch (error) { console.warn('auto resume', error.message); }
+    }
   });
   $('#queue-later')?.addEventListener('click', () => enqueueStaged());
   $('#interrupt-send')?.addEventListener('click', () => enqueueStaged({ interrupt: true }));
