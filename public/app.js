@@ -905,6 +905,9 @@ if ($('#composer-form')) {
   let renderedThreadIds = [];
   let revealedThreadId = null;
   let archivePending = false;
+  let threadCursor = null;
+  let threadPageCount = 1;
+  let threadsLoading = false;
   let archivedThreads = [];
   let archivedCursor = null;
   let archivedLoading = false;
@@ -949,22 +952,20 @@ if ($('#composer-form')) {
     archivePending = true;
     revealedThreadId = null;
     renderThreads();
-    const archived = [];
-    const failed = [];
-    let next = 0;
-    await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
-      while (next < pending.length) {
-        const id = pending[next++];
-        try {
-          await request(`/api/threads/${encodeURIComponent(id)}/commands/archive`, {
-            method: 'POST', body: '{}',
-          });
-          archived.push(id);
-        } catch (error) {
-          failed.push(error);
-        }
+    let archived = [];
+    let failed = [];
+    for (let offset = 0; offset < pending.length; offset += 500) {
+      try {
+        const result = await request('/api/threads/archive', {
+          method: 'POST', body: JSON.stringify({ threadIds: pending.slice(offset, offset + 500) }),
+        });
+        archived.push(...(result.archived || []));
+        failed.push(...(result.failed || []));
+      } catch (error) {
+        failed.push({ message: error.message });
+        break;
       }
-    }));
+    }
     const archivedIds = new Set(archived);
     for (const id of archivedIds) recentlyArchivedIds.add(id);
     state.threads = state.threads.filter((thread) => !archivedIds.has(thread.id));
@@ -974,7 +975,16 @@ if ($('#composer-form')) {
     if (archivedIds.has(state.threadId)) newThread();
     else renderThreads();
     if (archived.length) toast(`${archived.length} thread${archived.length === 1 ? '' : 's'} archived`);
-    if (failed.length) toast(`${failed.length} thread${failed.length === 1 ? '' : 's'} could not be archived: ${failed[0].message}`, 'error');
+    if (failed.length) {
+      const busy = failed.filter((item) => /active writer/i.test(item.message));
+      if (busy.length) {
+        const busyThread = busy.length === 1 && state.threads.find((thread) => thread.id === busy[0].id);
+        const label = busyThread ? `“${threadTitle(busyThread)}”` : `${busy.length} session${busy.length === 1 ? '' : 's'}`;
+        toast(`${label} still open in Codex; close the active session and retry Archive.`, 'error');
+      }
+      const other = failed.filter((item) => !/active writer/i.test(item.message));
+      if (other.length) toast(`${other.length} session${other.length === 1 ? '' : 's'} could not be archived: ${other[0].message}`, 'error');
+    }
   }
 
   async function loadArchivedThreads({ more = false } = {}) {
@@ -1124,6 +1134,8 @@ if ($('#composer-form')) {
   function renderThreads() {
     const list = $('#thread-list');
     list.replaceChildren();
+    $('#thread-load-more').classList.toggle('hidden', !threadCursor);
+    $('#thread-load-more').disabled = threadsLoading || archivePending;
     const query = ($('#session-search')?.value || '').trim().toLowerCase();
     let threads = [...state.threads];
     if (query) {
@@ -1356,10 +1368,31 @@ if ($('#composer-form')) {
     toast('Exported Markdown');
   }
 
-  async function loadThreads() {
+  async function loadThreads({ more = false } = {}) {
+    if (threadsLoading || (more && !threadCursor)) return;
+    threadsLoading = true;
+    renderThreads();
     try {
-      const [result, activity] = await Promise.all([request('/api/threads'), request('/api/activity')]);
-      const listed = result.data || result.threads || result.items || [];
+      let cursor = more ? threadCursor : null;
+      let listed = more ? [...state.threads] : [];
+      const seen = new Set(listed.map((thread) => thread.id));
+      const pageCount = more ? 1 : threadPageCount;
+      let activity;
+      let fetchedPages = 0;
+      for (let page = 0; page < pageCount; page += 1) {
+        const url = `/api/threads${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
+        const result = page === 0
+          ? await Promise.all([request(url), request('/api/activity')]).then(([threads, current]) => { activity = current; return threads; })
+          : await request(url);
+        for (const thread of result.data || result.threads || result.items || []) {
+          if (!seen.has(thread.id)) { listed.push(thread); seen.add(thread.id); }
+        }
+        fetchedPages += 1;
+        cursor = result.nextCursor || null;
+        if (!cursor) break;
+      }
+      threadCursor = cursor;
+      threadPageCount = more ? threadPageCount + fetchedPages : fetchedPages;
       const listedIds = new Set(listed.map((thread) => thread.id));
       for (const id of recentlyArchivedIds) if (!listedIds.has(id)) recentlyArchivedIds.delete(id);
       state.threads = listed.filter((thread) => !recentlyArchivedIds.has(thread.id));
@@ -1372,6 +1405,9 @@ if ($('#composer-form')) {
       updateRunStatus();
     } catch (error) {
       toast(error.message, 'error');
+    } finally {
+      threadsLoading = false;
+      renderThreads();
     }
   }
 
@@ -2544,6 +2580,7 @@ if ($('#composer-form')) {
   });
   $('#new-thread').addEventListener('click', newThread);
   $('#refresh-threads').addEventListener('click', loadThreads);
+  $('#thread-load-more').addEventListener('click', () => loadThreads({ more: true }));
   $('#thread-select-toggle').addEventListener('click', () => setThreadSelectionMode(!selectingThreads));
   $('#thread-select-all').addEventListener('click', () => {
     const allSelected = renderedThreadIds.length > 0 && renderedThreadIds.every((id) => selectedThreadIds.has(id));

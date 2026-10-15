@@ -156,6 +156,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .icon-button:hover, .text-button:hover { color: var(--text); background: var(--panel-2); }
 .thread-list { flex: 1; min-height: 0; overflow-y: auto; }
+.thread-load-more { width: 100%; min-height: 34px; color: var(--accent); font-size: 12px; }
 .thread-swipe { position: relative; overflow: hidden; margin: 2px 0; border-radius: 9px; }
 .thread-swipe-action {
   position: absolute; inset: 0 0 0 auto; width: 88px; padding: 0;

@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
+const { archiveBatch } = require('./archive-batch');
 
 const PROJECT_ROOT = __dirname;
 const PUBLIC_ROOT = path.join(PROJECT_ROOT, 'public');
@@ -575,6 +576,16 @@ async function api(req, res, pathname, searchParams = new URLSearchParams()) {
       archived: searchParams.get('archived') === 'true',
       ...(searchParams.get('cursor') ? { cursor: searchParams.get('cursor') } : {}),
     });
+    return json(res, 200, result);
+  }
+  if (pathname === '/api/threads/archive' && req.method === 'POST') {
+    const body = await readJson(req);
+    if (!Array.isArray(body.threadIds) || body.threadIds.length < 1 || body.threadIds.length > 500
+      || body.threadIds.some((id) => typeof id !== 'string' || !id || id.length > 128)) {
+      return json(res, 400, { error: 'Provide 1–500 thread IDs' });
+    }
+    const threadIds = [...new Set(body.threadIds)];
+    const result = await archiveBatch(threadIds, (threadId) => bridge.request('thread/archive', { threadId }));
     return json(res, 200, result);
   }
   if (pathname === '/api/threads' && req.method === 'POST') {

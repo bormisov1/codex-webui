@@ -6,7 +6,7 @@
   <title>Codex WebUI</title>
   <meta name="description" content="Free self-hosted browser UI for Codex on your machine.">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=19">
+  <link rel="stylesheet" href="/app.css?v=20">
   <script src="/viewport.js?v=3"></script>
 </head>
 <body data-theme="dark" data-accent="green">
@@ -36,6 +36,7 @@
         </div>
       </div>
       <nav class="thread-list" id="thread-list" aria-label="Conversations"></nav>
+      <button class="text-button thread-load-more hidden" id="thread-load-more" type="button">Load more sessions</button>
       <div class="thread-selection-bar hidden" id="thread-selection-bar">
         <span id="thread-selection-count">0 selected</span>
         <button id="archive-selected" type="button" disabled>Archive</button>
@@ -325,6 +326,6 @@
   </div>
 
   <script src="/dictation.js?v=2"></script>
-  <script src="/app.js?v=21"></script>
+  <script src="/app.js?v=22"></script>
 </body>
 </html>
