@@ -720,6 +720,81 @@ if ($('#composer-form')) {
     setTimeout(() => node.remove(), 5000);
   }
 
+  const dictationButton = $('#dictation-button');
+  const dictationStatus = $('#dictation-status');
+  const dictationLanguage = $('#dictation-language');
+  const savedDictationLanguage = localStorage.getItem('codex-webui-dictation-language');
+  if (['', 'ru-RU', 'en-US'].includes(savedDictationLanguage)) dictationLanguage.value = savedDictationLanguage;
+  dictationLanguage.addEventListener('change', () => {
+    localStorage.setItem('codex-webui-dictation-language', dictationLanguage.value);
+  });
+  let dictationState = 'idle';
+  let dictationInterim = '';
+  let dictationFailed = false;
+  let composerSubmitPending = false;
+  function renderDictation(stateName) {
+    if (stateName === 'starting') dictationFailed = false;
+    dictationState = stateName;
+    const active = stateName !== 'idle';
+    dictationButton.classList.toggle('active', active);
+    dictationButton.setAttribute('aria-pressed', String(active));
+    dictationButton.setAttribute('aria-label', active ? 'Stop dictation' : 'Start dictation');
+    dictationButton.title = active ? 'Stop dictation' : 'Start dictation';
+    dictationButton.disabled = stateName === 'stopping';
+    dictationLanguage.disabled = active || !dictation.supported;
+    dictationStatus.classList.toggle('hidden', !active);
+    dictationStatus.textContent = stateName === 'starting' ? 'Starting microphone…'
+      : stateName === 'stopping' ? 'Finishing dictation…'
+        : dictationInterim ? `Listening · ${dictationInterim}` : 'Listening…';
+  }
+  const dictation = window.CodexDictation.createBrowserProvider({
+    onState: renderDictation,
+    onFinal(transcript) {
+      const input = $('#message');
+      const separator = input.value && !/\s$/.test(input.value) && /^[\p{L}\p{N}]/u.test(transcript) ? ' ' : '';
+      if (input.maxLength >= 0 && input.value.length + separator.length + transcript.length > input.maxLength) {
+        dictationFailed = true;
+        dictation.stop();
+        toast('Message limit reached; dictation stopped.', 'error');
+        return;
+      }
+      input.value += `${separator}${transcript}`;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+    onInterim(transcript) {
+      dictationInterim = transcript;
+      if (dictationState !== 'idle') renderDictation(dictationState);
+    },
+    onError(code) {
+      dictationFailed = true;
+      const messages = {
+        'not-allowed': 'Microphone access was denied.',
+        'service-not-allowed': 'Browser speech recognition is blocked.',
+        'audio-capture': 'No microphone was found.',
+        'no-speech': 'No speech was detected.',
+        network: 'Browser speech recognition is unavailable right now.',
+        timeout: 'Browser speech recognition took too long to finish.',
+      };
+      toast(messages[code] || `Dictation failed: ${code}`, 'error');
+    },
+  });
+  if (!dictation.supported) {
+    dictationButton.disabled = true;
+    dictationButton.title = 'Speech recognition is unavailable in this browser';
+    dictationLanguage.disabled = true;
+  }
+  dictationButton.addEventListener('click', () => {
+    if (dictation.isActive()) dictation.stop();
+    else {
+      try { dictation.start({ language: dictationLanguage.value || navigator.language }); }
+      catch (error) { toast(error.message, 'error'); }
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) dictation.cancel();
+  });
+  window.addEventListener('pagehide', () => dictation.cancel());
+
   function setConnected(connected, label = connected ? 'Codex connected' : 'Reconnecting') {
     $('#connection-dot').classList.toggle('online', connected);
     $('#connection-label').textContent = label;
@@ -750,7 +825,7 @@ if ($('#composer-form')) {
     }
     updateRunStatus();
     $('#interrupt').classList.toggle('hidden', !running);
-    $('.send-button').disabled = false;
+    $('.send-button').disabled = composerSubmitPending;
     $('.workspace').classList.toggle('has-activity', state.activeThreadIds.size > 0);
     $('#activity-state-label').textContent = running ? 'Working now' : 'Waiting for work';
   }
@@ -1486,6 +1561,7 @@ if ($('#composer-form')) {
 
   async function openThread(id) {
     try {
+      dictation.cancel();
       resetPlan();
       const result = await request(`/api/threads/${encodeURIComponent(id)}`);
       const thread = result.thread || result;
@@ -1515,6 +1591,7 @@ if ($('#composer-form')) {
   }
 
   function newThread() {
+    dictation.cancel();
     state.threadId = null;
     localStorage.removeItem('codex-webui-active-thread');
     state.turnId = null;
@@ -1774,7 +1851,7 @@ if ($('#composer-form')) {
         state.running = running;
         state.awaitingTurn = running || state.awaitingTurn;
         $('#interrupt').classList.toggle('hidden', !running);
-        $('.send-button').disabled = false;
+        $('.send-button').disabled = composerSubmitPending;
         if (running) startResyncLoop();
         else {
           scheduleCatchupResync();
@@ -1791,7 +1868,8 @@ if ($('#composer-form')) {
       renderThreads();
       updateRunStatus();
     }
-    if (eventThreadId && state.threadId && eventThreadId !== state.threadId) return;
+    // A new thread has no ID yet, so events from existing threads stay in the background.
+    if (eventThreadId && eventThreadId !== state.threadId) return;
     if (method === 'turn/started') {
       state.turnId = params.turn?.id || params.turnId;
       setRunning(true);
@@ -1979,22 +2057,39 @@ if ($('#composer-form')) {
     }
   }
 
+  async function submitComposer() {
+    if (composerSubmitPending) return;
+    composerSubmitPending = true;
+    $('.send-button').disabled = true;
+    try {
+      if (dictation.isActive()) {
+        const outcome = await dictation.stop();
+        if (outcome !== 'ended' || dictationFailed) return;
+      }
+      const input = $('#message');
+      const text = input.value;
+      if (state.running) {
+        if (!text.trim() && !state.attachments.length) return;
+        state.stagedMessage = { text, attachments: state.attachments.map((file) => ({ ...file })) };
+        input.value = '';
+        input.style.height = '';
+        $('#queue-choice').classList.remove('hidden');
+        return;
+      }
+      input.value = '';
+      input.style.height = '';
+      sendMessage(text);
+    } catch (error) {
+      toast(`Dictation could not finish: ${error.message}`, 'error');
+    } finally {
+      composerSubmitPending = false;
+      $('.send-button').disabled = false;
+    }
+  }
   $('#composer-form').addEventListener('submit', (event) => {
     event.preventDefault();
     hideCommands();
-    const input = $('#message');
-    const text = input.value;
-    if (state.running) {
-      if (!text.trim() && !state.attachments.length) return;
-      state.stagedMessage = { text, attachments: state.attachments.map((file) => ({ ...file })) };
-      input.value = '';
-      input.style.height = '';
-      $('#queue-choice').classList.remove('hidden');
-      return;
-    }
-    input.value = '';
-    input.style.height = '';
-    sendMessage(text);
+    submitComposer();
   });
   $('#queue-later')?.addEventListener('click', () => enqueueStaged());
   $('#interrupt-send')?.addEventListener('click', () => enqueueStaged({ interrupt: true }));

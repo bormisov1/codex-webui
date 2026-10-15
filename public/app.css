@@ -552,6 +552,17 @@ select {
   color: var(--muted); background: transparent; border: 0; border-radius: 8px; font-size: 16px;
 }
 .attach-button:hover { color: var(--text); background: var(--panel-3); }
+.dictation-button {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 32px; height: 32px; margin-top: 2px; padding: 0;
+  color: #07110d; background: var(--accent); border: 0; border-radius: 9px;
+}
+.dictation-button svg { display: block; }
+.dictation-button.active { color: #07110d; background: #ff8585; }
+.dictation-button:disabled { cursor: not-allowed; opacity: .4; }
+.dictation-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dictation-status { margin: 2px 2px 8px 42px; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.dictation-status.hidden { display: none; }
 .composer.drag { border-color: var(--accent); }
 .composer {
   padding: 10px 12px 8px; background: #17191d; border: 1px solid #383c44;
@@ -701,6 +712,7 @@ select {
 .composer-settings select {
   padding: 4px 6px; color: var(--muted); background: transparent; font-size: 10px; max-width: 150px;
 }
+#dictation-language { max-width: 125px; }
 #active-workspace {
   overflow: hidden; color: #747a84; font: 10px ui-monospace, monospace;
   text-overflow: ellipsis; white-space: nowrap; max-width: 180px;
@@ -811,8 +823,9 @@ select {
   .composer textarea { min-height: 28px; font-size: 16px; }
   .composer-settings { max-width: calc(100% - 45px); }
   .composer-settings select { max-width: 135px; min-height: 34px; font-size: 16px; }
+  #dictation-language { max-width: 120px; }
   #active-workspace { display: none; }
-  .send-button { flex: 0 0 auto; width: 38px; height: 38px; }
+  .dictation-button, .send-button { flex: 0 0 auto; width: 38px; height: 38px; }
   .conversation {
     width: 100%;
     padding: 18px max(14px, env(safe-area-inset-right)) 20px max(14px, env(safe-area-inset-left));
