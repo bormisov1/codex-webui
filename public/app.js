@@ -98,6 +98,8 @@ if ($('#composer-form')) {
     messageQueue: [],
     queueSending: false,
     queueFailedId: null,
+    interruptingTurnId: null,
+    interruptedTurnIds: new Set(),
     stagedMessage: null,
     commandIndex: 0,
   };
@@ -305,6 +307,13 @@ if ($('#composer-form')) {
     localStorage.setItem(QUEUE_KEY, JSON.stringify(state.messageQueue));
     renderMessageQueue();
   }
+  function hasQueuedMessagesForCurrentThread() {
+    return state.messageQueue.some((item) => !item.threadId || item.threadId === state.threadId);
+  }
+  function queueMessage(message) {
+    state.messageQueue.push({ ...message, id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, threadId: state.threadId });
+    saveMessageQueue();
+  }
   function loadMessageQueue() {
     try { state.messageQueue = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]') || []; }
     catch { state.messageQueue = []; }
@@ -332,16 +341,16 @@ if ($('#composer-form')) {
   }
   function enqueueStaged({ interrupt = false } = {}) {
     if (!state.stagedMessage) return;
-    state.messageQueue.push({ ...state.stagedMessage, id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, threadId: state.threadId });
+    queueMessage(state.stagedMessage);
     state.stagedMessage = null;
     clearAttachments();
     $('#queue-choice').classList.add('hidden');
     saveDraft();
-    saveMessageQueue();
-    if (interrupt) $('#interrupt').click();
+    if (interrupt && state.running && state.turnId) $('#interrupt').click();
+    else flushMessageQueue();
   }
   async function flushMessageQueue() {
-    if (state.running || state.queueSending) return;
+    if (state.running || state.queueSending || state.interruptingTurnId) return;
     const index = state.messageQueue.findIndex((item) => !item.threadId || item.threadId === state.threadId);
     if (index < 0) return;
     const next = state.messageQueue[index];
@@ -351,7 +360,7 @@ if ($('#composer-form')) {
     renderAttachments();
     let sent = false;
     try {
-      sent = await sendMessage(next.text || '');
+      sent = await sendMessage(next.text || '', { fromQueue: true });
       if (sent) {
         state.messageQueue = state.messageQueue.filter((item) => item.id !== next.id);
         saveMessageQueue();
@@ -361,7 +370,7 @@ if ($('#composer-form')) {
       }
     } finally {
       state.queueSending = false;
-      if (sent && !state.running && state.messageQueue.some((item) => !item.threadId || item.threadId === state.threadId)) {
+      if (sent && !state.running && hasQueuedMessagesForCurrentThread()) {
         flushMessageQueue();
       }
     }
@@ -1976,10 +1985,13 @@ if ($('#composer-form')) {
       }
       syncThreadStatus(thread);
       const activeTurn = [...(thread.turns || [])].reverse().find((turn) => turn.status === 'inProgress');
-      state.turnId = activeTurn?.id || (state.running ? state.turnId : null);
+      const currentTurnInHistory = state.turnId && (thread.turns || []).some((turn) => turn.id === state.turnId);
       // Fresh thread history is authoritative. A mobile browser can silently
       // miss the SSE completion event and leave activeThreadIds stale.
-      const active = thread.status?.type === 'active' || Boolean(activeTurn);
+      // A new turn can be absent from thread/read briefly after turn/start.
+      const active = thread.status?.type === 'active' || Boolean(activeTurn)
+        || (state.awaitingTurn && !currentTurnInHistory);
+      state.turnId = activeTurn?.id || (active ? state.turnId : null);
       setRunning(active);
       if (!active && lastTurn && /fail|error/i.test(String(lastTurn.status || ''))
           && (rateLimitError(lastTurn.error?.message)
@@ -2256,9 +2268,18 @@ if ($('#composer-form')) {
     renderAttachments();
   }
 
-  async function sendMessage(text) {
+  async function sendMessage(text, { fromQueue = false } = {}) {
     const cleaned = text.trim();
-    if ((!cleaned && !state.attachments.length) || state.running) return false;
+    if (!cleaned && !state.attachments.length) return false;
+    // A turn may finish while the user is composing. Keep every later send
+    // behind messages already waiting for this thread.
+    if (!fromQueue && (state.queueSending || hasQueuedMessagesForCurrentThread())) {
+      queueMessage({ text, attachments: state.attachments.map((file) => ({ ...file })) });
+      clearAttachments();
+      flushMessageQueue();
+      return true;
+    }
+    if (state.running) return false;
     if (!state.autoResumeSending && autoResumeEntry()?.pending) {
       delete autoResumeEntry().pending;
       saveAutoResume();
@@ -2288,6 +2309,7 @@ if ($('#composer-form')) {
       }
       setRunning(true);
       state.awaitingTurn = true;
+      state.turnId = null;
       state.streamingNode = null;
       state.streamingItemId = null;
       state.streamingPhase = null;
@@ -2379,6 +2401,10 @@ if ($('#composer-form')) {
     const method = message.method || '';
     const params = message.params || {};
     const eventThreadId = params.threadId || params.thread?.id || params.turn?.threadId;
+    const eventTurnId = params.turn?.id || params.turnId;
+    if (method === 'turn/completed' && eventTurnId && state.interruptedTurnIds.has(eventTurnId)) return;
+    if (method === 'turn/completed' && eventThreadId === state.threadId
+        && eventTurnId && state.turnId && eventTurnId !== state.turnId) return;
     if (method === 'thread/status/changed' && params.threadId) {
       if (params.status?.type === 'active') state.activeThreadIds.add(params.threadId);
       else state.activeThreadIds.delete(params.threadId);
@@ -3011,18 +3037,28 @@ if ($('#composer-form')) {
     location.href = '/login.html';
   });
   $('#interrupt').addEventListener('click', async () => {
-    if (!state.threadId || !state.turnId) return;
+    if (!state.threadId || !state.turnId || state.interruptingTurnId) return;
+    const interruptedTurnId = state.turnId;
+    state.interruptingTurnId = interruptedTurnId;
+    state.interruptedTurnIds.add(interruptedTurnId);
     try {
-      await request(`/api/threads/${encodeURIComponent(state.threadId)}/turns/${encodeURIComponent(state.turnId)}/interrupt`, { method: 'POST', body: '{}' });
+      await request(`/api/threads/${encodeURIComponent(state.threadId)}/turns/${encodeURIComponent(interruptedTurnId)}/interrupt`, { method: 'POST', body: '{}' });
       setRunning(false);
       state.awaitingTurn = false;
+      state.turnId = null;
+      state.interruptingTurnId = null;
       stopResyncLoop();
       clearCatchupTimers();
       finalizeStreamingMessage();
       resyncThread({ force: true });
       addEvent('Turn interrupted');
       flushMessageQueue();
-    } catch (error) { toast(error.message, 'error'); }
+    } catch (error) {
+      state.interruptingTurnId = null;
+      state.interruptedTurnIds.delete(interruptedTurnId);
+      toast(error.message, 'error');
+      resyncThread({ force: true });
+    }
   });
   $$('.suggestions button').forEach((button) => button.addEventListener('click', () => sendMessage(button.dataset.prompt)));
   $$('.approval-actions button').forEach((button) => button.addEventListener('click', () => decideApproval(button.dataset.decision)));
