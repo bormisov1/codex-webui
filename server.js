@@ -726,11 +726,19 @@ async function api(req, res, pathname, searchParams = new URLSearchParams()) {
   }
   const interruptMatch = pathname.match(/^\/api\/threads\/([^/]+)\/turns\/([^/]+)\/interrupt$/);
   if (interruptMatch && req.method === 'POST') {
-    const result = await bridge.request('turn/interrupt', {
-      threadId: decodeURIComponent(interruptMatch[1]),
-      turnId: decodeURIComponent(interruptMatch[2]),
-    });
-    return json(res, 200, result);
+    const threadId = decodeURIComponent(interruptMatch[1]);
+    const requestedTurnId = decodeURIComponent(interruptMatch[2]);
+    const active = bridge.activeThreads.get(threadId);
+    const turnId = active?.turnId || requestedTurnId;
+    try {
+      const result = await bridge.request('turn/interrupt', { threadId, turnId });
+      bridge.activeThreads.delete(threadId);
+      return json(res, 200, result || { ok: true });
+    } catch (error) {
+      const alreadyStopped = /not active|not found|already (?:completed|stopped)|no active turn|invalid.*turn/i.test(error.message || '');
+      if (alreadyStopped || (active && !bridge.activeThreads.has(threadId))) return json(res, 200, { ok: true, alreadyStopped: true });
+      throw error;
+    }
   }
   const approvalMatch = pathname.match(/^\/api\/requests\/([^/]+)$/);
   if (approvalMatch && req.method === 'POST') {
