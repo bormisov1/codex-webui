@@ -245,6 +245,7 @@ test('slash command menu covers the CLI catalog and supports keyboard selection'
 
 test('live activity panel renders supported progress without private reasoning text', () => {
   assert.match(html, /id="activity-rail"/);
+  assert.match(server, /summary: 'detailed'/);
   assert.match(app, /item\/reasoning\/summaryTextDelta/);
   assert.match(app, /turn\/plan\/updated/);
   assert.match(app, /item\/commandExecution\/outputDelta/);

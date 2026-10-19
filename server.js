@@ -686,6 +686,7 @@ async function api(req, res, pathname, searchParams = new URLSearchParams()) {
       approvalsReviewer: 'user',
       sandboxPolicy: permissions.sandboxPolicy,
       effort: body.effort || null,
+      summary: 'detailed',
     });
     bridge.activeThreads.set(threadId, {
       threadId,
