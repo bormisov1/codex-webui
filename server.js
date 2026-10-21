@@ -14,6 +14,7 @@ const PUBLIC_ROOT = path.join(PROJECT_ROOT, 'public');
 const UPLOAD_ROOT = path.join(PROJECT_ROOT, 'data', 'uploads');
 const SESSION_STORE = path.join(PROJECT_ROOT, 'data', 'auth-sessions.json');
 const AMT_STORE = path.join(PROJECT_ROOT, 'data', 'amt.json');
+const AUTO_RESUME_STORE = path.join(PROJECT_ROOT, 'data', 'auto-resume.json');
 const AMT_BASE = process.env.AMT_BASE_URL || 'https://agentmediatools.com';
 
 function loadEnv(file) {
@@ -47,8 +48,30 @@ const LOCAL_GIT_CONFIG = process.env.GIT_CONFIG_GLOBAL || path.join(WORKSPACE_RO
 const sessions = new Map();
 const loginAttempts = new Map();
 const sseClients = new Set();
+const autoResumeJobs = new Map();
+const autoResumeRunning = new Set();
 
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
+
+function saveAutoResumeJobs() {
+  const temporary = `${AUTO_RESUME_STORE}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify([...autoResumeJobs.values()], null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, AUTO_RESUME_STORE);
+}
+
+function loadAutoResumeJobs() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(AUTO_RESUME_STORE, 'utf8'));
+    for (const job of saved) {
+      if (job && typeof job.threadId === 'string' && job.threadId && Number.isFinite(job.retryAt)
+          && job.message && typeof job.message === 'object') autoResumeJobs.set(job.threadId, job);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn(`Could not restore auto-resume jobs: ${error.message}`);
+  }
+}
+
+loadAutoResumeJobs();
 
 function sessionKey(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
@@ -471,6 +494,141 @@ function serveStatic(req, res, pathname) {
   return true;
 }
 
+async function startMessageTurn(threadId, body) {
+  const attachments = Array.isArray(body.attachments) ? body.attachments.slice(0, MAX_ATTACHMENTS) : [];
+  if (typeof body.text !== 'string' || body.text.length > 50000) {
+    throw Object.assign(new Error('Message must be 0–50,000 characters'), { status: 400 });
+  }
+  if (!body.text.trim() && !attachments.length) {
+    throw Object.assign(new Error('Message or attachment required'), { status: 400 });
+  }
+  if (body.cwd) allowedWorkspace(body.cwd);
+  try { await bridge.request('thread/resume', { threadId }); } catch (error) {
+    // A newly created thread has no rollout to resume until its first turn is stored.
+    if (!/already|active|loaded|no rollout found/i.test(error.message)) throw error;
+  }
+  const input = [];
+  const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '';
+  if (systemPrompt) {
+    input.push({
+      type: 'text',
+      text: `[System instructions for this session — follow unless the user overrides]\n${systemPrompt.slice(0, 8000)}`,
+    });
+  }
+  if (body.amtToolsEnabled) {
+    try {
+      const tools = await amtFetchTools();
+      const free = tools.filter((tool) => String(tool.tier || '').toLowerCase() === 'free').slice(0, 30);
+      const paid = tools.filter((tool) => String(tool.tier || '').toLowerCase() !== 'free').slice(0, 20);
+      const planLines = [
+        '[Agent Media Tools — optional cloud tools]',
+        'User has AMT tools enabled. Prefer free tier tools first. Paid/agent-tier tools require their linked AMT key and may spend credits.',
+        `Base URL: ${AMT_BASE}`,
+        free.length ? `Free tools: ${free.map((tool) => tool.id).join(', ')}` : 'Free tools: (catalog unavailable)',
+        paid.length ? `Other tiers (gated): ${paid.map((tool) => `${tool.id}[${tool.tier}]`).join(', ')}` : '',
+        'Call tools via HTTPS REST with Authorization: Bearer <their AMT key> when appropriate; do not invent credentials.',
+      ].filter(Boolean);
+      input.push({ type: 'text', text: planLines.join('\n').slice(0, 6000) });
+    } catch (error) {
+      console.warn('AMT tools hint failed:', error.message);
+    }
+  }
+  if (body.text.trim()) input.push({ type: 'text', text: body.text.trim() });
+  for (const attachment of attachments) {
+    const resolved = allowedUpload(attachment?.path);
+    const name = String(attachment?.name || path.basename(resolved)).slice(0, 180);
+    const mimeType = String(attachment?.mimeType || mimeFor(resolved)).slice(0, 200);
+    if (IMAGE_TYPES.has(path.extname(resolved).toLowerCase())) {
+      input.push({ type: 'localImage', path: resolved });
+    } else {
+      input.push({
+        type: 'text',
+        text: `[User attached file: ${name}]\nAbsolute path: ${resolved}\nMIME: ${mimeType}\nUse tools to inspect this path as needed.`,
+      });
+    }
+  }
+  const cwd = allowedWorkspace(body.cwd || WORKSPACE_ROOT);
+  const permissions = permissionPreset(body.permissionMode, cwd);
+  const result = await bridge.request('turn/start', {
+    threadId,
+    input,
+    cwd,
+    approvalPolicy: permissions.approvalPolicy,
+    approvalsReviewer: 'user',
+    sandboxPolicy: permissions.sandboxPolicy,
+    effort: body.effort || null,
+    summary: 'detailed',
+  });
+  bridge.activeThreads.set(threadId, {
+    threadId,
+    turnId: result.turn?.id || result.id || null,
+    activeFlags: [],
+    updatedAt: Date.now(),
+  });
+  return result;
+}
+
+function rateLimitDelay(payload, now = Date.now()) {
+  const limits = payload?.rateLimits || payload?.rate_limits || payload || {};
+  const windows = [limits.primary, limits.secondary].filter((window) => window && typeof window === 'object');
+  const exhausted = windows.filter((window) => Number(window.usedPercent ?? window.used_percent) >= 100);
+  if (!exhausted.length) return 0;
+  const resets = exhausted.map((window) => Number(window.resetsAt ?? window.resets_at))
+    .filter(Number.isFinite).map((reset) => reset < 1e12 ? reset * 1000 : reset).filter((reset) => reset > now);
+  return resets.length ? Math.max(...resets) : now + 60000;
+}
+
+function scheduleAutoResume(threadId, retryAt, message) {
+  const job = {
+    threadId,
+    retryAt: Math.max(Date.now(), Number(retryAt)),
+    message,
+    attempts: 0,
+    updatedAt: Date.now(),
+  };
+  autoResumeJobs.set(threadId, job);
+  saveAutoResumeJobs();
+  return job;
+}
+
+async function processAutoResumeJobs() {
+  const now = Date.now();
+  for (const job of autoResumeJobs.values()) {
+    if (job.retryAt > now || autoResumeRunning.has(job.threadId)) continue;
+    if (bridge.activeThreads.has(job.threadId)) {
+      job.retryAt = now + 15000;
+      job.updatedAt = now;
+      saveAutoResumeJobs();
+      continue;
+    }
+    autoResumeRunning.add(job.threadId);
+    try {
+      let limits;
+      try { limits = await bridge.request('account/rateLimits/read', {}); } catch { limits = null; }
+      const delayedUntil = rateLimitDelay(limits, Date.now());
+      if (delayedUntil) {
+        job.retryAt = delayedUntil + 1000;
+        job.updatedAt = Date.now();
+        saveAutoResumeJobs();
+        continue;
+      }
+      await startMessageTurn(job.threadId, job.message);
+      autoResumeJobs.delete(job.threadId);
+      saveAutoResumeJobs();
+      console.log(`Auto-resumed thread ${job.threadId}`);
+    } catch (error) {
+      job.attempts = Number(job.attempts || 0) + 1;
+      job.lastError = String(error.message || error).slice(0, 500);
+      job.retryAt = Date.now() + (/rate.?limit|usage.?limit|quota|too many requests|429/i.test(job.lastError) ? 60000 : 300000);
+      job.updatedAt = Date.now();
+      saveAutoResumeJobs();
+      console.warn(`Auto-resume failed for ${job.threadId}: ${job.lastError}`);
+    } finally {
+      autoResumeRunning.delete(job.threadId);
+    }
+  }
+}
+
 async function api(req, res, pathname, searchParams = new URLSearchParams()) {
   if (pathname === '/api/login' && req.method === 'POST') {
     const key = req.socket.remoteAddress || 'unknown';
@@ -619,81 +777,52 @@ async function api(req, res, pathname, searchParams = new URLSearchParams()) {
     }
     return json(res, 200, result);
   }
+  const autoResumeMatch = pathname.match(/^\/api\/threads\/([^/]+)\/auto-resume$/);
+  if (autoResumeMatch) {
+    const threadId = decodeURIComponent(autoResumeMatch[1]);
+    if (!threadId || threadId.length > 128) return json(res, 400, { error: 'Invalid thread ID' });
+    if (req.method === 'GET') {
+      const job = autoResumeJobs.get(threadId);
+      return json(res, 200, { scheduled: Boolean(job), retryAt: job?.retryAt, attempts: job?.attempts, lastError: job?.lastError });
+    }
+    if (req.method === 'DELETE') {
+      const cancelled = autoResumeJobs.delete(threadId);
+      if (cancelled) saveAutoResumeJobs();
+      return json(res, 200, { ok: true, cancelled });
+    }
+    if (req.method === 'PUT') {
+      const body = await readJson(req, 2 * 1024 * 1024);
+      const retryAt = Number(body.retryAt);
+      const source = body.message;
+      if (!Number.isFinite(retryAt) || retryAt <= 0 || !source || typeof source !== 'object') {
+        return json(res, 400, { error: 'retryAt and message are required' });
+      }
+      const attachments = Array.isArray(source.attachments) ? source.attachments.slice(0, MAX_ATTACHMENTS).map((attachment) => ({
+        name: String(attachment?.name || '').slice(0, 180),
+        path: allowedUpload(attachment?.path),
+        mimeType: String(attachment?.mimeType || '').slice(0, 200),
+      })) : [];
+      const message = {
+        text: typeof source.text === 'string' ? source.text : '',
+        cwd: allowedWorkspace(source.cwd || WORKSPACE_ROOT),
+        effort: typeof source.effort === 'string' ? source.effort.slice(0, 20) : '',
+        systemPrompt: typeof source.systemPrompt === 'string' ? source.systemPrompt.slice(0, 8000) : '',
+        amtToolsEnabled: Boolean(source.amtToolsEnabled),
+        permissionMode: typeof source.permissionMode === 'string' ? source.permissionMode : 'moderate',
+        attachments,
+      };
+      if (message.text.length > 50000 || (!message.text.trim() && !attachments.length)) {
+        return json(res, 400, { error: 'Message or attachment required' });
+      }
+      const job = scheduleAutoResume(threadId, retryAt, message);
+      return json(res, 202, { ok: true, scheduled: true, retryAt: job.retryAt });
+    }
+  }
   const messageMatch = pathname.match(/^\/api\/threads\/([^/]+)\/messages$/);
   if (messageMatch && req.method === 'POST') {
     const threadId = decodeURIComponent(messageMatch[1]);
     const body = await readJson(req, 2 * 1024 * 1024);
-    const attachments = Array.isArray(body.attachments) ? body.attachments.slice(0, MAX_ATTACHMENTS) : [];
-    if (typeof body.text !== 'string' || body.text.length > 50000) {
-      return json(res, 400, { error: 'Message must be 0–50,000 characters' });
-    }
-    if (!body.text.trim() && !attachments.length) {
-      return json(res, 400, { error: 'Message or attachment required' });
-    }
-    if (body.cwd) allowedWorkspace(body.cwd);
-    try { await bridge.request('thread/resume', { threadId }); } catch (error) {
-      // A newly created thread has no rollout to resume until its first turn is stored.
-      if (!/already|active|loaded|no rollout found/i.test(error.message)) throw error;
-    }
-    const input = [];
-    const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '';
-    if (systemPrompt) {
-      input.push({
-        type: 'text',
-        text: `[System instructions for this session — follow unless the user overrides]\n${systemPrompt.slice(0, 8000)}`,
-      });
-    }
-    if (body.amtToolsEnabled) {
-      try {
-        const tools = await amtFetchTools();
-        const free = tools.filter((t) => String(t.tier || '').toLowerCase() === 'free').slice(0, 30);
-        const paid = tools.filter((t) => String(t.tier || '').toLowerCase() !== 'free').slice(0, 20);
-        const planLines = [
-          '[Agent Media Tools — optional cloud tools]',
-          'User has AMT tools enabled. Prefer free tier tools first. Paid/agent-tier tools require their linked AMT key and may spend credits.',
-          `Base URL: ${AMT_BASE}`,
-          free.length ? `Free tools: ${free.map((t) => t.id).join(', ')}` : 'Free tools: (catalog unavailable)',
-          paid.length ? `Other tiers (gated): ${paid.map((t) => `${t.id}[${t.tier}]`).join(', ')}` : '',
-          'Call tools via HTTPS REST with Authorization: Bearer <their AMT key> when appropriate; do not invent credentials.',
-        ].filter(Boolean);
-        input.push({ type: 'text', text: planLines.join('\n').slice(0, 6000) });
-      } catch (error) {
-        console.warn('AMT tools hint failed:', error.message);
-      }
-    }
-    if (body.text.trim()) input.push({ type: 'text', text: body.text.trim() });
-    for (const attachment of attachments) {
-      const resolved = allowedUpload(attachment?.path);
-      const name = String(attachment?.name || path.basename(resolved)).slice(0, 180);
-      const mimeType = String(attachment?.mimeType || mimeFor(resolved)).slice(0, 200);
-      const isImage = IMAGE_TYPES.has(path.extname(resolved).toLowerCase());
-      if (isImage) {
-        input.push({ type: 'localImage', path: resolved });
-      } else {
-        input.push({
-          type: 'text',
-          text: `[User attached file: ${name}]\nAbsolute path: ${resolved}\nMIME: ${mimeType}\nUse tools to inspect this path as needed.`,
-        });
-      }
-    }
-    const cwd = allowedWorkspace(body.cwd || WORKSPACE_ROOT);
-    const permissions = permissionPreset(body.permissionMode, cwd);
-    const result = await bridge.request('turn/start', {
-      threadId,
-      input,
-      cwd,
-      approvalPolicy: permissions.approvalPolicy,
-      approvalsReviewer: 'user',
-      sandboxPolicy: permissions.sandboxPolicy,
-      effort: body.effort || null,
-      summary: 'detailed',
-    });
-    bridge.activeThreads.set(threadId, {
-      threadId,
-      turnId: result.turn?.id || result.id || null,
-      activeFlags: [],
-      updatedAt: Date.now(),
-    });
+    const result = await startMessageTurn(threadId, body);
     return json(res, 202, result);
   }
   const commandMatch = pathname.match(/^\/api\/threads\/([^/]+)\/commands\/([^/]+)$/);
@@ -876,8 +1005,12 @@ server.listen(PORT, HOST, () => {
   console.log(`Codex WebUI listening on http://${HOST}:${PORT}`);
   console.log(`Workspace root: ${WORKSPACE_ROOT}`);
 });
+const autoResumeTimer = setInterval(() => processAutoResumeJobs().catch((error) => console.warn(`Auto-resume worker: ${error.message}`)), 15000);
+autoResumeTimer.unref();
+setTimeout(() => processAutoResumeJobs().catch((error) => console.warn(`Auto-resume worker: ${error.message}`)), 1000).unref();
 
 function shutdown() {
+  clearInterval(autoResumeTimer);
   server.close();
   if (bridge.proc && !bridge.proc.killed) bridge.proc.kill('SIGTERM');
   setTimeout(() => process.exit(0), 1000).unref();

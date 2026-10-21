@@ -39,6 +39,16 @@ test('hashed login sessions persist across service restarts', () => {
   assert.match(server, /function saveSessions\(\)/);
 });
 
+test('mobile auto-resume jobs persist and execute without a connected phone', () => {
+  assert.match(server, /auto-resume\.json/);
+  assert.match(server, /function loadAutoResumeJobs\(\)/);
+  assert.match(server, /function saveAutoResumeJobs\(\)/);
+  assert.match(server, /\/auto-resume\$\/\)/);
+  assert.match(server, /function processAutoResumeJobs\(\)/);
+  assert.match(server, /await startMessageTurn\(job\.threadId, job\.message\)/);
+  assert.match(server, /setInterval\(\(\) => processAutoResumeJobs/);
+});
+
 test('state-changing requests enforce same-origin checks', () => {
   assert.match(server, /function sameOrigin/);
   assert.match(server, /Origin rejected/);
